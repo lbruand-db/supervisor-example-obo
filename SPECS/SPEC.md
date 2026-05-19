@@ -387,15 +387,23 @@ the Apps OAuth flow; Genie calls then run as that user.
       `databricks.yml`/`manifest.yaml`, a new prompt, and one extra `@tool`
       wrapper in `agent.py` — no graph rewiring.
 
-## 12. Open questions / follow-ups
+## 12. Decisions
 
-- **Token scope** — confirm the exact `user_api_scopes` value Genie requires
-  (`dashboards.genie` vs. `genie`); validate during first deploy.
-- **MCP vs. direct Genie SDK** — the MCP path is preferred (uniform tool
-  surface); fall back to `w.genie.start_conversation` only if MCP latency is
-  unacceptable.
-- **Conversation memory** — out of scope for v1; if needed, port the
-  short-term-memory pieces from `agent-langgraph-advanced`.
-- **Eval harness** — `evaluate_agent.py` should include at least one OBO
-  scenario where the test user lacks access and the agent must surface the
-  permission error gracefully instead of falling back to SP creds.
+- **Token scope** — start with `dashboards.genie` + `sql` in
+  `user_api_scopes`; the exact Genie scope name will be confirmed on first
+  deploy (`databricks bundle run -t dev` and inspect the granted scopes). If
+  the platform reports an unknown-scope error, adjust to whatever name the
+  deploy validation surfaces.
+- **MCP vs. direct Genie SDK** — implement against the Databricks MCP Genie
+  server (`/api/2.0/mcp/genie/{space_id}`). Only fall back to
+  `WorkspaceClient.genie.start_conversation` if MCP latency proves
+  unacceptable in eval; do not build both paths up front.
+- **Conversation memory** — out of scope for v1. Each request rebuilds the
+  graph and is stateless. If memory is later required, port the
+  short-term-memory checkpointer pieces from `agent-langgraph-advanced`
+  rather than rolling a new design.
+- **Eval harness** — `evaluate_agent.py` must include at least one OBO
+  negative case: a test user with no UC grant on the underlying tables. The
+  agent must surface the permission error from Genie back to the caller and
+  must **not** retry under SP credentials. The `OBO_FALLBACK_TO_DEFAULT`
+  flag is local-dev only and must be off in eval/prod.
