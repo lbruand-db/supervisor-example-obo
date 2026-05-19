@@ -1,0 +1,31 @@
+version: 1
+name: "Supervisor Agent (OBO)"
+description: "Hierarchical LangGraph supervisor agent (L1 router -> L2 domain supervisor -> Genie space) querying Genie on behalf of the calling user."
+
+resource_specs:
+  - name: "experiment"
+    description: "The destination MLflow experiment for traces from the agent's execution."
+    experiment_spec:
+      permission: "CAN_EDIT"
+
+  - name: "genie_finance"
+    description: "Finance Genie space queried by the finance L2 supervisor."
+    genie_space_spec:
+      permission: "CAN_RUN"
+
+  - name: "genie_sales"
+    description: "Sales Genie space queried by the sales L2 supervisor."
+    genie_space_spec:
+      permission: "CAN_RUN"
+
+  - name: "llm_endpoint"
+    description: "Chat model serving endpoint used by all supervisors."
+    serving_endpoint_spec:
+      permission: "CAN_QUERY"
+
+# Downscoped OAuth scopes requested for the end-user token forwarded to the
+# app as `x-forwarded-access-token`. Genie + the SQL warehouse it drives need
+# both of these. Confirm the exact scope name on first deploy.
+user_api_scopes:
+  - "dashboards.genie"
+  - "sql"

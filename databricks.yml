@@ -1,0 +1,72 @@
+bundle:
+  name: supervisor_example_obo
+
+resources:
+  apps:
+    supervisor_example_obo:
+      name: "supervisor-example-obo"
+      description: "Hierarchical LangGraph supervisor agent (L1 -> L2 -> Genie) with end-user OBO."
+      source_code_path: ./
+      config:
+        command: ["uv", "run", "start-app"]
+        env:
+          - name: MLFLOW_TRACKING_URI
+            value: "databricks"
+          - name: MLFLOW_REGISTRY_URI
+            value: "databricks-uc"
+          - name: API_PROXY
+            value: "http://localhost:8000/invocations"
+          - name: CHAT_APP_PORT
+            value: "3000"
+          - name: CHAT_PROXY_TIMEOUT_SECONDS
+            value: "300"
+          - name: MLFLOW_EXPERIMENT_ID
+            value_from: "experiment"
+          - name: GENIE_FINANCE_SPACE_ID
+            value_from: "genie_finance"
+          - name: GENIE_SALES_SPACE_ID
+            value_from: "genie_sales"
+          - name: LLM_ENDPOINT
+            value_from: "llm_endpoint"
+
+      # Resources which this app has access to.
+      resources:
+        - name: 'experiment'
+          experiment:
+            experiment_id: ""
+            permission: 'CAN_MANAGE'
+
+        # TODO: set the Genie space UUIDs (find them in the Genie space URL).
+        - name: 'genie_finance'
+          genie_space:
+            name: 'Finance Genie'
+            space_id: '<YOUR-FINANCE-GENIE-SPACE-ID>'
+            permission: 'CAN_RUN'
+
+        - name: 'genie_sales'
+          genie_space:
+            name: 'Sales Genie'
+            space_id: '<YOUR-SALES-GENIE-SPACE-ID>'
+            permission: 'CAN_RUN'
+
+        # TODO: change to whichever chat model serving endpoint you want to use.
+        - name: 'llm_endpoint'
+          serving_endpoint:
+            name: 'databricks-gpt-5-2'
+            permission: 'CAN_QUERY'
+
+targets:
+  dev:
+    mode: development
+    default: true
+    # workspace:
+    #   host: https://...
+
+  prod:
+    mode: production
+    # workspace:
+    #   host: https://...
+    resources:
+      apps:
+        supervisor_example_obo:
+          name: supervisor-example-obo
