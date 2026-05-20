@@ -1,15 +1,34 @@
 # Hierarchical Supervisor Agent (with Genie OBO)
 
 A Databricks App that hosts a LangChain/LangGraph **hierarchical supervisor**
-agent and queries Genie spaces **on behalf of the calling user** (OBO):
+agent and queries Genie spaces **on behalf of the calling user** (OBO).
 
-```
-user -> L1 router -> L2 domain supervisor (finance | sales | ...) -> Genie space
+```mermaid
+flowchart TD
+    user([End user])
+    L1["L1 router supervisor"]
+    L2F["L2 supervisor – Finance"]
+    L2S["L2 supervisor – Sales"]
+    GF[("Genie space – Finance")]
+    GS[("Genie space – Sales")]
+
+    user -- "POST /responses<br/>x-forwarded-access-token" --> L1
+    L1 -- "ask_finance(question)" --> L2F
+    L1 -- "ask_sales(question)" --> L2S
+    L2F -- "MCP tool call (OBO)" --> GF
+    L2S -- "MCP tool call (OBO)" --> GS
+
+    classDef sp fill:#e8f1ff,stroke:#3b82f6,color:#1e3a8a;
+    classDef obo fill:#fff7ed,stroke:#f97316,color:#7c2d12;
+    class L1,L2F,L2S sp;
+    class GF,GS obo;
 ```
 
-LLM and infra calls run as the app's service principal. Genie tool calls run
-under the end-user's identity (`x-forwarded-access-token`), so Unity Catalog
-grants on the underlying tables are enforced per caller.
+- Blue nodes (L1 / L2 supervisors and the chat LLM) run under the **app
+  service-principal**.
+- Orange nodes (Genie tool calls) run under the **end-user's identity** via
+  `x-forwarded-access-token`, so Unity Catalog grants on the underlying
+  tables are enforced per caller.
 
 See [`SPECS/SPEC.md`](SPECS/SPEC.md) for the design, the manifest /
 `databricks.yml` mapping, the OBO contract, and the acceptance criteria.
