@@ -1,6 +1,7 @@
 import logging
 import os
-from typing import Any, AsyncGenerator, AsyncIterator, Optional
+from collections.abc import AsyncGenerator, AsyncIterator
+from typing import Any
 
 from databricks.sdk import WorkspaceClient
 from databricks_langchain.chat_models import json
@@ -50,7 +51,7 @@ def get_user_workspace_client() -> WorkspaceClient:
     )
 
 
-def get_databricks_host_from_env() -> Optional[str]:
+def get_databricks_host_from_env() -> str | None:
     try:
         w = WorkspaceClient()
         return w.config.host

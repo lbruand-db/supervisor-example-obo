@@ -7,7 +7,7 @@ Catalog grants on the underlying tables are enforced per caller.
 
 import logging
 import os
-from typing import AsyncGenerator
+from collections.abc import AsyncGenerator
 
 import mlflow
 from databricks.sdk import WorkspaceClient
@@ -122,9 +122,7 @@ async def build_l1_agent(user_ws: WorkspaceClient):
     handoff_tools = []
     for domain in DOMAINS:
         l2 = await _build_l2_supervisor(user_ws, domain)
-        handoff_tools.append(
-            _make_l1_tool(domain["name"], domain["tool_description"], l2)
-        )
+        handoff_tools.append(_make_l1_tool(domain["name"], domain["tool_description"], l2))
 
     return create_agent(
         tools=handoff_tools,
@@ -153,9 +151,7 @@ async def stream_handler(
     user_ws = get_user_workspace_client()
     agent = await build_l1_agent(user_ws)
 
-    messages = {
-        "messages": to_chat_completions_input([i.model_dump() for i in request.input])
-    }
+    messages = {"messages": to_chat_completions_input([i.model_dump() for i in request.input])}
 
     async for event in process_agent_astream_events(
         agent.astream(input=messages, stream_mode=["updates", "messages"])
