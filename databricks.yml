@@ -36,17 +36,16 @@ resources:
             experiment_id: ""
             permission: 'CAN_MANAGE'
 
-        # TODO: set the Genie space UUIDs (find them in the Genie space URL).
         - name: 'genie_finance'
           genie_space:
-            name: 'Finance Genie'
-            space_id: '<YOUR-FINANCE-GENIE-SPACE-ID>'
+            name: 'Supervisor OBO - Finance'
+            space_id: '01f15474886a16d5aa027e0791fa855a'
             permission: 'CAN_RUN'
 
         - name: 'genie_sales'
           genie_space:
-            name: 'Sales Genie'
-            space_id: '<YOUR-SALES-GENIE-SPACE-ID>'
+            name: 'Supervisor OBO - Sales'
+            space_id: '01f15474da541750b15a234e1fcc4145'
             permission: 'CAN_RUN'
 
         # TODO: change to whichever chat model serving endpoint you want to use.
