@@ -102,7 +102,7 @@ async def _build_l2_supervisor(user_ws: WorkspaceClient, domain: dict):
     return create_agent(
         tools=tools,
         model=ChatDatabricks(endpoint=LLM_ENDPOINT),
-        prompt=domain["system_prompt"],
+        system_prompt=domain["system_prompt"],
     )
 
 
@@ -127,7 +127,7 @@ async def build_l1_agent(user_ws: WorkspaceClient):
     return create_agent(
         tools=handoff_tools,
         model=ChatDatabricks(endpoint=LLM_ENDPOINT),
-        prompt=prompts.L1_ROUTER,
+        system_prompt=prompts.L1_ROUTER,
     )
 
 

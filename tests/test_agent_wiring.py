@@ -85,9 +85,9 @@ def test_build_l1_agent_constructs_one_tool_per_domain(monkeypatch):
 
     captured = {}
 
-    def fake_create_agent(tools, model, prompt):  # noqa: ARG001
+    def fake_create_agent(tools, model, system_prompt):  # noqa: ARG001
         captured["tools"] = tools
-        captured["prompt"] = prompt
+        captured["prompt"] = system_prompt
         return MagicMock()
 
     monkeypatch.setattr(agent_mod, "_build_l2_supervisor", fake_build_l2)
