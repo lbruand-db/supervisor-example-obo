@@ -53,6 +53,56 @@ flowchart TD
 > endpoint (`/api/2.0/mcp/genie/{space_id}`) demands, so MCP 403s under
 > OBO. See [`SPECS/SPEC.md`](SPECS/SPEC.md) §12 for the full trace.
 
+## Get this running in 5 minutes
+
+Prereqs: `uv`, the Databricks CLI, and access to a workspace where the
+`samples.tpch.*` and `samples.bakehouse.*` schemas exist (true on most
+recent workspaces) and where you can create an MLflow experiment and SQL
+warehouse-backed Genie spaces.
+
+```bash
+# 1. Clone + install
+git clone https://github.com/lbruand-db/supervisor-example-obo.git
+cd supervisor-example-obo
+uv sync
+
+# 2. Authenticate against YOUR workspace
+databricks auth login --host https://<your-workspace>.cloud.databricks.com -p mine
+
+# 3. Create the demo resources (Genie spaces + MLflow experiment) and
+#    write their IDs into .env. Re-running is safe; existing IDs are reused.
+uv run setup-demo --profile mine
+
+# 4. Try it locally first (optional but quick).
+#    OBO_FALLBACK_TO_DEFAULT=1 in .env lets the user-token path fall back
+#    to your CLI auth when x-forwarded-access-token is absent.
+uv run start-server &
+curl -s -X POST localhost:8000/responses \
+  -H 'Content-Type: application/json' \
+  -d '{"input":[{"role":"user","content":"Total revenue in samples.tpch.orders?"}]}'
+
+# 5. Deploy to Databricks Apps and start the app.
+uv run deploy --profile mine
+# Open the URL printed at the end and ask a sample question:
+#   "How many sales transactions are there by franchise?"     -> ask_sales
+#   "What is the total order revenue by year (samples.tpch)?" -> ask_finance
+```
+
+What `setup-demo` creates (all in *your* workspace, all idempotent):
+
+| Resource | How / where |
+|---|---|
+| MLflow experiment | `/Users/<you>/supervisor-example-obo` for agent traces. |
+| Finance Genie space | Backed by `samples.tpch.{orders,lineitem,customer,nation,region}`, attached to the first serverless SQL warehouse it finds. |
+| Sales Genie space | Backed by `samples.bakehouse.sales_{transactions,customers,franchises,suppliers}`. |
+| `.env` | Adds `MLFLOW_EXPERIMENT_ID` / `GENIE_*_SPACE_ID` for local dev, and `BUNDLE_VAR_*` keys consumed by `uv run deploy`. |
+
+To customize the domains (e.g., replace finance/sales with your own
+data), edit `DOMAINS` in `agent_server/agent.py` and the matching prompts
+in `agent_server/prompts.py`, then point the bundle at your own Genie
+spaces by editing `setup_demo.py`'s `FINANCE_TABLES` / `SALES_TABLES` or
+by setting the `GENIE_*_SPACE_ID` values manually in `.env`.
+
 ## Live deployment
 
 L1 routes a finance question to `ask_finance`, the L2 supervisor calls the

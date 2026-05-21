@@ -192,7 +192,9 @@ After installation, the skills will be available as slash commands (e.g., `/agen
 | `tests/test_agent_wiring.py` | Smoke tests for DOMAINS shape, prompt guardrails, OBO contract, L1 tool wiring |
 | `.github/workflows/ci.yml` | PR/push CI: ruff + pytest |
 | `.github/workflows/deploy.yml` | Manual deploy via OIDC federation |
-| `scripts/quickstart.py` | One-command setup script (vendored from upstream template) |
+| `scripts/setup_demo.py` | `uv run setup-demo`: creates two Genie spaces + MLflow experiment + writes `.env` (idempotent) |
+| `scripts/deploy.py` | `uv run deploy`: loads `.env` so `BUNDLE_VAR_*` is set, then bundle validate + deploy + run |
+| `scripts/quickstart.py` | Vendored upstream setup script (auth + experiment) — superseded for this repo by `setup-demo` / `deploy` |
 | `scripts/discover_tools.py` | Discovers available workspace resources (vendored) |
 
 ---
