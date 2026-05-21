@@ -7,6 +7,13 @@ resources:
       name: "supervisor-example-obo"
       description: "Hierarchical LangGraph supervisor agent (L1 -> L2 -> Genie) with end-user OBO."
       source_code_path: ./
+
+      # OAuth scopes requested for the user token forwarded to the app as
+      # `x-forwarded-access-token`. Genie + the SQL warehouse it drives both
+      # need these — without them, Genie calls 403 under end-user identity.
+      user_api_scopes:
+        - dashboards.genie
+        - sql
       config:
         command: ["uv", "run", "start-app"]
         env:
@@ -33,7 +40,7 @@ resources:
       resources:
         - name: 'experiment'
           experiment:
-            experiment_id: ""
+            experiment_id: '1456842180535736'
             permission: 'CAN_MANAGE'
 
         - name: 'genie_finance'
