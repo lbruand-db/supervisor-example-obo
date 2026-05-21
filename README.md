@@ -15,8 +15,8 @@ flowchart TD
     user -- "POST /responses<br/>x-forwarded-access-token" --> L1
     L1 -- "ask_finance(question)" --> L2F
     L1 -- "ask_sales(question)" --> L2S
-    L2F -- "MCP tool call (OBO)" --> GF
-    L2S -- "MCP tool call (OBO)" --> GS
+    L2F -- "genie_finance (OBO)" --> GF
+    L2S -- "genie_sales (OBO)" --> GS
 
     classDef sp fill:#e8f1ff,stroke:#3b82f6,color:#1e3a8a;
     classDef obo fill:#fff7ed,stroke:#f97316,color:#7c2d12;
@@ -29,6 +29,14 @@ flowchart TD
 - Orange nodes (Genie tool calls) run under the **end-user's identity** via
   `x-forwarded-access-token`, so Unity Catalog grants on the underlying
   tables are enforced per caller.
+
+## Live deployment
+
+L1 routes a finance question to `ask_finance`, the L2 supervisor calls the
+`genie_finance` tool, and Genie returns the per-year revenue from
+`samples.tpch.orders` under the calling user's identity:
+
+![Supervisor agent answering a finance question via Genie OBO](SPECS/img/screenshot.png)
 
 See [`SPECS/SPEC.md`](SPECS/SPEC.md) for the design, the manifest /
 `databricks.yml` mapping, the OBO contract, and the acceptance criteria.
