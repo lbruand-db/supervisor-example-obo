@@ -76,12 +76,9 @@ def test_build_l1_agent_constructs_one_tool_per_domain(monkeypatch):
 
     from agent_server import agent as agent_mod
 
-    # Stub the L2 builder and the L1 create_agent so we don't hit MCP or the LLM.
+    # Stub the L2 builder and the L1 create_agent so we don't hit Genie or the LLM.
     fake_l2 = MagicMock()
     fake_l2.ainvoke = AsyncMock(return_value={"messages": [MagicMock(content="ok")]})
-
-    async def fake_build_l2(_user_ws, _domain):
-        return fake_l2
 
     captured = {}
 
@@ -90,13 +87,11 @@ def test_build_l1_agent_constructs_one_tool_per_domain(monkeypatch):
         captured["prompt"] = system_prompt
         return MagicMock()
 
-    monkeypatch.setattr(agent_mod, "_build_l2_supervisor", fake_build_l2)
+    monkeypatch.setattr(agent_mod, "_build_l2_supervisor", lambda _u, _d: fake_l2)
     monkeypatch.setattr(agent_mod, "create_agent", fake_create_agent)
     monkeypatch.setattr(agent_mod, "ChatDatabricks", lambda endpoint: MagicMock(endpoint=endpoint))
 
-    import asyncio
-
-    asyncio.run(agent_mod.build_l1_agent(user_ws=MagicMock()))
+    agent_mod.build_l1_agent(user_ws=MagicMock())
 
     assert captured["prompt"] == agent_mod.prompts.L1_ROUTER
     assert len(captured["tools"]) == len(agent_mod.DOMAINS)
@@ -111,7 +106,5 @@ def test_build_l2_supervisor_requires_space_id_env(monkeypatch):
 
     finance_domain = next(d for d in agent_mod.DOMAINS if d["name"] == "finance")
 
-    import asyncio
-
     with pytest.raises(RuntimeError, match="GENIE_FINANCE_SPACE_ID"):
-        asyncio.run(agent_mod._build_l2_supervisor(user_ws=MagicMock(), domain=finance_domain))
+        agent_mod._build_l2_supervisor(user_ws=MagicMock(), domain=finance_domain)

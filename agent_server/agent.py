@@ -11,11 +11,7 @@ from collections.abc import AsyncGenerator
 
 import mlflow
 from databricks.sdk import WorkspaceClient
-from databricks_langchain import (
-    ChatDatabricks,
-    DatabricksMCPServer,
-    DatabricksMultiServerMCPClient,
-)
+from databricks_langchain import ChatDatabricks
 from langchain.agents import create_agent
 from langchain_core.tools import tool
 from mlflow.genai.agent_server import invoke, stream
@@ -28,7 +24,6 @@ from mlflow.types.responses import (
 
 from agent_server import prompts
 from agent_server.utils import (
-    get_databricks_host_from_env,
     get_session_id,
     get_user_workspace_client,
     process_agent_astream_events,
@@ -66,41 +61,56 @@ DOMAINS = [
 ]
 
 
-def _genie_mcp_url(space_id: str) -> str:
-    host = get_databricks_host_from_env()
-    if not host:
-        raise RuntimeError("Cannot resolve Databricks host. Check auth / .env.")
-    return f"{host}/api/2.0/mcp/genie/{space_id}"
+def _build_genie_tool(user_ws: WorkspaceClient, name: str, space_id: str):
+    """A single LangChain tool that asks the Genie space `space_id` a question.
 
+    Uses the direct Genie REST API via the SDK (start_conversation_and_wait)
+    bound to `user_ws`. This runs under the end-user's identity and Unity
+    Catalog grants — the calling user must have CAN_RUN on the Genie space
+    AND grants on the underlying tables.
 
-async def _build_genie_tools(user_ws: WorkspaceClient, name: str, space_id: str):
-    """Return LangChain tools backed by the Genie MCP server, bound to `user_ws`.
-
-    The MCP client uses `user_ws` for the HTTP call, so Genie executes under
-    the end-user's identity and UC grants.
+    Why not the MCP route (/api/2.0/mcp/genie/{space_id}): that endpoint
+    requires a scope beyond the documented user_api_scopes allowlist
+    (`sql`, `dashboards.genie`, `files.files`), so it 403s under OBO. The
+    direct Genie API works with just `dashboards.genie`.
     """
-    client = DatabricksMultiServerMCPClient(
-        [
-            DatabricksMCPServer(
-                name=f"genie-{name}",
-                url=_genie_mcp_url(space_id),
-                workspace_client=user_ws,
-            )
-        ]
+
+    @tool(
+        name_or_callable=f"genie_{name}",
+        description=(
+            f"Query the {name} Genie space with a natural-language question. "
+            "Returns Genie's textual answer plus any SQL it generated. "
+            "Forwards permission errors verbatim — do not retry under another identity."
+        ),
     )
-    return await client.get_tools()
+    def _query(question: str) -> str:
+        msg = user_ws.genie.start_conversation_and_wait(space_id, question)
+        parts: list[str] = []
+        for att in msg.attachments or []:
+            if att.text and att.text.content:
+                parts.append(att.text.content)
+            if att.query:
+                if att.query.description:
+                    parts.append(f"_{att.query.description}_")
+                if att.query.query:
+                    parts.append(f"```sql\n{att.query.query}\n```")
+        if not parts and msg.content:
+            parts.append(msg.content)
+        return "\n\n".join(parts) if parts else "(no response from Genie)"
+
+    return _query
 
 
-async def _build_l2_supervisor(user_ws: WorkspaceClient, domain: dict):
+def _build_l2_supervisor(user_ws: WorkspaceClient, domain: dict):
     space_id = os.environ.get(domain["space_id_env"])
     if not space_id:
         raise RuntimeError(
             f"Missing env {domain['space_id_env']} for domain '{domain['name']}'. "
             "Set it in app.yaml / .env."
         )
-    tools = await _build_genie_tools(user_ws, domain["name"], space_id)
+    genie_tool = _build_genie_tool(user_ws, domain["name"], space_id)
     return create_agent(
-        tools=tools,
+        tools=[genie_tool],
         model=ChatDatabricks(endpoint=LLM_ENDPOINT),
         system_prompt=domain["system_prompt"],
     )
@@ -117,11 +127,11 @@ def _make_l1_tool(name: str, description: str, child_agent):
     return _ask
 
 
-async def build_l1_agent(user_ws: WorkspaceClient):
+def build_l1_agent(user_ws: WorkspaceClient):
     """Build the full L1 -> L2 -> Genie graph for a single request."""
     handoff_tools = []
     for domain in DOMAINS:
-        l2 = await _build_l2_supervisor(user_ws, domain)
+        l2 = _build_l2_supervisor(user_ws, domain)
         handoff_tools.append(_make_l1_tool(domain["name"], domain["tool_description"], l2))
 
     return create_agent(
@@ -149,7 +159,7 @@ async def stream_handler(
         mlflow.update_current_trace(metadata={"mlflow.trace.session": session_id})
 
     user_ws = get_user_workspace_client()
-    agent = await build_l1_agent(user_ws)
+    agent = build_l1_agent(user_ws)
 
     messages = {"messages": to_chat_completions_input([i.model_dump() for i in request.input])}
 

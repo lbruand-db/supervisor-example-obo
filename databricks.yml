@@ -9,14 +9,15 @@ resources:
       source_code_path: ./
 
       # OAuth scopes requested for the user token forwarded to the app as
-      # `x-forwarded-access-token`. The MCP Genie endpoint
-      # (/api/2.0/mcp/genie/{space_id}) runs as a Databricks-hosted serving
-      # endpoint, so the user token also needs `serving.serving-endpoints`
-      # — `dashboards.genie + sql` alone got a 403 from the MCP route.
+      # `x-forwarded-access-token`. The agent calls the direct Genie REST API
+      # (w.genie.start_conversation_and_wait), which works with
+      # `dashboards.genie` plus the `sql` scope Genie uses to drive the SQL
+      # warehouse. The MCP Genie route (/api/2.0/mcp/genie/...) was tried
+      # first and 403'd: it requires a scope outside the documented
+      # user_api_scopes allowlist (sql / dashboards.genie / files.files).
       user_api_scopes:
         - dashboards.genie
         - sql
-        - serving.serving-endpoints
       config:
         command: ["uv", "run", "start-app"]
         env:
