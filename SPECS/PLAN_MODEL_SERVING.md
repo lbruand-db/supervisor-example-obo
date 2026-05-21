@@ -209,46 +209,118 @@ targets:
      --request '{"input":[{"role":"user","content":"YTD revenue by year?"}]}'
    ```
 
-## 6. OBO at the serving endpoint — **open question**
+## 6. OBO at the serving endpoint — *spike results*
 
-This is the single biggest design risk and the part of the port that needs
-real prototyping before any of the other work is worth doing.
+**Spike code**: [`spikes/serving-obo/`](../spikes/serving-obo/) — a
+one-screen `ResponsesAgent` that probes every plausible identity source
+inside `predict()` and runs a live Genie call under both the default
+client and the OBO client.
 
-**The Apps path used today** — `x-forwarded-access-token` set by the
-platform proxy, lifted into a `WorkspaceClient(token=..., auth_type="pat")`,
-which the Genie SDK then uses. That header **does not exist** at a Model
-Serving endpoint.
+### 6.1 What the docs say
 
-**Candidate mechanisms** to evaluate, in order of preference:
+[Databricks Mosaic AI docs](https://docs.databricks.com/aws/en/generative-ai/agent-framework/agent-authentication-model-serving)
+define the supported pattern:
 
-1. **Mosaic AI "Agent on-behalf-of-user" auth** *(preferred if available
-   in this workspace)*. The endpoint is created with
-   `endpoint_role=END_USER` (or whatever the GA name is), and the model
-   code calls a helper such as
-   `databricks_agents.runtime.get_user_workspace_client()` to obtain a
-   client scoped to the caller. Verify what `mlflow_models.resources` +
-   `databricks.agents.deploy` actually wire up — the API surface has
-   churned. If this works, `get_user_workspace_client(request)` becomes
-   a one-line shim and the agent code in §4.1 is reused literally
-   unchanged.
+```python
+# Inside predict() — NOT __init__.
+from databricks.sdk import WorkspaceClient
+from databricks_ai_bridge import ModelServingUserCredentials
 
-2. **Workspace OBO via `Authorization` header passthrough**. Some
-   serving-endpoint runtimes expose the caller's bearer in
-   `request.context.databricks_user_token` (or equivalent). If true, we
-   take the same `auth_type="pat"` approach as the Apps build. Risk:
-   tokens may already be downscoped at the endpoint boundary, with the
-   same allowlist issue we hit in [SPEC.md §12](SPEC.md).
+user_client = WorkspaceClient(credentials_strategy=ModelServingUserCredentials())
+```
 
-3. **Endpoint SP only, no OBO** *(fallback, not the goal)*. The endpoint
-   runs every Genie query under the endpoint's own SP — UC grants are no
-   longer per-caller. We'd lose the security story. Only ship this if
-   options 1 and 2 are blocked.
+Required at log time:
 
-**Action**: before any of the implementation work, spike a one-screen
-`ResponsesAgent` model that just returns
-`{"identity": request.context.<whatever>}` and deploy it on a serving
-endpoint. Verify the caller's identity is actually reachable; only then
-proceed.
+```python
+from mlflow.models.auth_policy import AuthPolicy, UserAuthPolicy
+
+mlflow.pyfunc.log_model(
+    ...,
+    auth_policy=AuthPolicy(
+        user_auth_policy=UserAuthPolicy(
+            api_scopes=["dashboards.genie", "sql"],   # OBO scopes
+        ),
+        system_auth_policy=SystemAuthPolicy(
+            resources=[DatabricksGenieSpace(genie_space_id=...)],   # SP grants
+        ),
+    ),
+)
+```
+
+OBO-supported resources include **Genie Space** (alongside Vector Search,
+Model Serving Endpoint, SQL Warehouse, UC Connections / Tables / Functions,
+MCP). For broader OBO needs the docs explicitly say: "Databricks recommends
+deploying your agent on Databricks Apps" — i.e. the existing Apps build is
+the official recommendation when the resource set is large.
+
+### 6.2 What actually happens on this workspace
+
+Deployed two versions of the `identity_echo` model to a serving endpoint
+called `supervisor-obo-spike` on `fevm-stable-po64og`:
+
+**v2** — `mlflow.pyfunc.log_model(..., no auth_policy)`. Query with my
+U2M OAuth bearer:
+
+```json
+"workspace_client_default": {
+  "auth_type": "model-serving",
+  "user_name":     "eb8bffce-902c-4a43-aeec-dbbbbaeddf7c",
+  "display_name":  "System Service Principal"
+},
+"context": null,
+"env":  {"DATABRICKS_USER_TOKEN": null, ...}    // nothing identity-shaped
+```
+
+Endpoint's own SP, no caller identity reachable anywhere.
+
+**v3** — same model, **with** `auth_policy=AuthPolicy(UserAuthPolicy(
+api_scopes=["dashboards.genie","sql"]), SystemAuthPolicy([DatabricksGenieSpace(...)]))`.
+Query with the same U2M OAuth bearer:
+
+```text
+ValueError: model_serving_user_credentials auth: Unable to detect
+credentials for user authorization. This error has two common causes:
+  (1) Improper OBO configuration — ensure you logged your model with a
+      UserAuthPolicy AND that the 'Agent Framework: On-Behalf-Of-User
+      Authorization' preview is enabled in your workspace.
+  (2) WorkspaceClient instantiation outside of predict()/predict_stream() …
+```
+
+We did log with `UserAuthPolicy` and we did instantiate inside `predict()`.
+The remaining cause is **(1) — the workspace-level preview flag**:
+
+> "User authorization is in Public Preview. Your workspace admin must
+> enable it before you can use user authorization."
+> — [docs](https://docs.databricks.com/aws/en/generative-ai/agent-framework/authenticate-on-behalf-of-user)
+
+The preview toggle isn't exposed via the `databricks settings` CLI nor
+via any `/api/2.0/previews*` endpoint we could find — it's a UI-only
+flip in **Workspace Admin → Settings → Previews → "Agent Framework:
+On-Behalf-Of-User Authorization"**.
+
+### 6.3 Conclusion
+
+| Mechanism | Result |
+|---|---|
+| Default `WorkspaceClient()` inside `predict()` | Endpoint's SP only. No OBO. |
+| `request.context` / forwarded env vars | None of them carry the caller. |
+| `WorkspaceClient(credentials_strategy=ModelServingUserCredentials())` with `AuthPolicy` attached + preview disabled | Raises `ValueError` at runtime. |
+| Same, with **preview enabled** by a workspace admin | *Untested — blocked on workspace admin.* Docs claim this returns a client scoped to the caller. |
+
+**Status of the port**: feasible **if and only if** the OBO preview can
+be enabled on the target workspace. Without it, the serving path falls
+back to "endpoint SP only" and loses the per-caller UC enforcement that
+is the whole point of this example.
+
+**Next step**: ask a workspace admin (which on this workspace is me —
+account console toggle, not yet pulled) to enable the preview, then
+re-run v3 of the spike and capture the populated `workspace_client_obo`
++ `genie_obo` fields.
+
+**Risk for customers**: enabling the preview is a per-workspace action,
+which means a copy-paste of this example will fail on any workspace
+that hasn't done it. The Apps build (current default) has no equivalent
+prerequisite. Worth calling out in the README when this port lands.
 
 ## 7. Resources mapping
 
@@ -288,8 +360,11 @@ proceed.
 
 ## 10. Open questions
 
-- Which OBO mechanism (§6) actually works on the target workspace? Spike
-  before committing to the rest.
+- ~~Which OBO mechanism (§6) actually works on the target workspace?~~
+  **Answered** by the spike: `ModelServingUserCredentials` is the only
+  supported path; it requires the workspace preview flag to be on.
+  Still open: get the workspace admin to flip the flag and re-run v3 of
+  the spike to verify the OBO client actually resolves to the caller.
 - Where does the agent run when the endpoint scales to zero — cold start
   cost relative to the warmed Apps process. Measure before promising a
   customer "this is faster."
