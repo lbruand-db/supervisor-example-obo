@@ -44,6 +44,8 @@ default-groups = ["dev", "setup"]
 
 [project.scripts]
 quickstart = "scripts.quickstart:main"
+setup-demo = "scripts.setup_demo:main"
+deploy = "scripts.deploy:main"
 start-app = "scripts.start_app:main"
 start-server = "agent_server.start_server:main"
 agent-evaluate = "agent_server.evaluate_agent:evaluate"
