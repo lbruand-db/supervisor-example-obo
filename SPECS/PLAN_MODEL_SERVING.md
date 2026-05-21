@@ -19,15 +19,32 @@ Expose the same `/responses`-compatible agent at
 `https://<workspace>/serving-endpoints/supervisor-example-obo/invocations`
 (OpenAI Responses-compatible), with:
 
-- The same L1→L2→Genie graph code reused unchanged.
+- The same L1→L2→Genie graph code reused largely unchanged (only the
+  identity-binding line moves).
 - Per-caller identity preserved for Genie reads (so UC grants on the
-  underlying tables still gate access — this is the key OBO requirement
-  and the main open question of the port; see §6).
+  underlying tables still gate access). Spike-verified in §6.
 - One bundle target (`-t serving`) that builds, logs, registers, and
   deploys the endpoint end-to-end via `databricks bundle deploy`.
 
 Non-goal: deprecating the Apps deployment. Apps + Serving are
 complementary; this plan exists so customers can pick whichever fits.
+
+## 1.1 Prerequisites (READ THIS FIRST)
+
+This port only works on a workspace where a specific public preview has
+been turned on. Without it the OBO path returns a runtime `ValueError`
+and every Genie call has to fall back to the endpoint's service
+principal — which defeats the point. Confirm before doing any of the
+implementation work.
+
+| Prereq | Where | How |
+|---|---|---|
+| Public preview **"Agent Framework: On-Behalf-Of-User Authorization"** must be **enabled on the workspace** | Workspace Admin → Settings → Previews | UI-only toggle. Not exposed via `databricks settings` CLI or `/api/2.0/previews*`. Requires workspace-admin role. |
+| Endpoint must be **(re)deployed after** the preview is on | `uv run deploy-serving` (a redeploy is enough; the model artifact stays the same) | The runtime checks the preview at deploy time, not request time. Endpoints logged *before* the toggle keep failing even once it's on; only endpoints deployed *after* the toggle pick it up. |
+| Caller must hit the endpoint with an **OAuth user token** (U2M), not a PAT | `databricks auth login --host <ws>` | A PAT bound to the same user works for `/api/2.0/*` but not for the serving endpoint's per-caller propagation. |
+
+Customers without workspace-admin rights to flip the preview should
+stay on the Apps build — there's no equivalent prereq there.
 
 ## 2. Why bother — trade-offs vs the Apps deployment
 
@@ -351,12 +368,20 @@ location.
 
 ## 7. Resources mapping
 
-| Concern | Apps build today | Serving build |
+The Apps build declares everything in `databricks.yml`. The serving
+build splits the declarations: most resources go into the **MLflow
+`AuthPolicy` attached at log time** (the spike showed this is the actual
+plumbing path), and only the endpoint shape lives in `databricks.yml`.
+
+| Concern | Apps build today | Serving build (confirmed by spike unless marked *guess*) |
 |---|---|---|
-| Genie space access | `genie_space: { permission: CAN_RUN }` for the app's SP in `databricks.yml` | `DatabricksGenieSpace` in `mlflow.models.resources` at log time + (probably) re-listed under the endpoint's `served_entities` |
-| Experiment | App resource | `experiment` resource on the bundle (still scope-of-bundle, not the endpoint) |
-| LLM endpoint | App resource (CAN_QUERY) | `DatabricksServingEndpoint` in model resources |
-| OAuth scopes | `user_api_scopes: [dashboards.genie, sql]` in `databricks.yml` | Not applicable — Apps construct, no equivalent on serving endpoints |
+| Per-caller token | Apps proxy injects `x-forwarded-access-token`; agent reads via `get_request_headers()` | `WorkspaceClient(credentials_strategy=ModelServingUserCredentials())` inside `predict()` — instantiation **must** be inside `predict()` / `predict_stream()`. |
+| OBO scopes | `user_api_scopes: [dashboards.genie, sql]` in `databricks.yml` | `UserAuthPolicy(api_scopes=["dashboards.genie", "sql"])` at log time, inside `mlflow.pyfunc.log_model(..., auth_policy=AuthPolicy(user_auth_policy=...))`. |
+| Genie space access (end-user) | `genie_space:` resource (CAN_RUN for the app's SP) in `databricks.yml` | Covered by `UserAuthPolicy` scopes above. The user must already have CAN_RUN; no extra grant from the model. |
+| Genie space access (endpoint SP) | n/a — Apps use forwarded token only | `SystemAuthPolicy(resources=[DatabricksGenieSpace(genie_space_id=...)])` at log time. Used for any code path that uses the default `WorkspaceClient()`. |
+| LLM endpoint access | App `serving_endpoint:` resource (CAN_QUERY) in `databricks.yml` | `SystemAuthPolicy(resources=[DatabricksServingEndpoint(endpoint_name=...)])` at log time. |
+| Experiment | App `experiment:` resource | *Guess:* same — declare on the bundle (not the endpoint). MLflow tracking just needs the URI; not bundled into AuthPolicy. |
+| Endpoint shape (workload size, scale-to-zero, traffic) | n/a (Apps shape lives in `app.yaml` + DAB) | `serving_endpoints:` DAB resource in `databricks.yml` — sketch in §4.4, **untested**. |
 
 ## 8. What we lose
 
