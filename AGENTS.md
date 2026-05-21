@@ -1,5 +1,58 @@
 # Agent Development Guide
 
+## This project at a glance
+
+Hierarchical supervisor agent on Databricks Apps:
+
+- **L1 router** picks one domain. **L2 domain supervisors** (finance, sales)
+  each own one Genie space.
+- **OBO at the leaf**: L2 supervisors call Genie under the **end-user's
+  identity** via `x-forwarded-access-token`. LLM + infra calls stay on the
+  app service principal.
+- **Genie via the direct SDK**, not MCP. The MCP route
+  (`/api/2.0/mcp/genie/{space_id}`) 403s under OBO because it requires a
+  scope outside the `user_api_scopes` allowlist (`sql`, `dashboards.genie`,
+  `files.files`). The leaf uses `w.genie.start_conversation_and_wait(...)`,
+  which works with just `dashboards.genie`.
+
+### Live deployment
+
+- Workspace: `https://fevm-serverless-stable-po64og.cloud.databricks.com`
+- CLI profile (PAT): `fevm-stable-po64og`. OAuth profile (needed for
+  `databricks apps logs`): `fevm-po64og-oauth`.
+- App URL: https://supervisor-example-obo-7474659269459324.aws.databricksapps.com
+- Bundle name: `supervisor_example_obo` (DAB resource id), app name:
+  `supervisor-example-obo`.
+- Genie spaces (created via `/api/2.0/data-rooms`, since the SDK has no
+  `create_space`): finance `01f15474886a16d5aa027e0791fa855a`
+  (samples.tpch.*), sales `01f15474da541750b15a234e1fcc4145`
+  (samples.bakehouse.*).
+- MLflow experiment: `1456842180535736`.
+
+### Spec / source-of-truth
+
+- Design + decisions live in [`SPECS/SPEC.md`](SPECS/SPEC.md). Update it
+  when the architecture or scope decisions change.
+- Tests: `uv run pytest` (smoke tests only — no LLM/Genie calls).
+- Lint/format: `uv run ruff check .` / `uv run ruff format .`.
+- CI: `.github/workflows/ci.yml` runs ruff + pytest on every PR/push.
+- Deploy: `.github/workflows/deploy.yml` (manual dispatch, OIDC).
+
+### Editing rules of thumb
+
+- **Don't reintroduce the MCP Genie path** unless `user_api_scopes` grows
+  to include the right scope. The current SDK leaf is the workaround.
+- **Don't widen `user_api_scopes`** beyond `dashboards.genie + sql` without
+  a real need — the OBO surface should stay minimal.
+- **Adding a domain**: append an entry to `DOMAINS` in
+  `agent_server/agent.py`, add the system prompt to `prompts.py`, and
+  declare the new `genie_space` resource in `databricks.yml` /
+  `manifest.yaml`. Nothing else should need to change.
+- **Don't silently bypass OBO**: `OBO_FALLBACK_TO_DEFAULT=1` is a local-dev
+  escape hatch only — must be unset in eval/prod.
+
+---
+
 ## MANDATORY First Actions
 
 **Ask the user interactively:**
@@ -129,13 +182,18 @@ After installation, the skills will be available as slash commands (e.g., `/agen
 
 | File | Purpose |
 |------|---------|
-| `agent_server/agent.py` | Agent logic, model, instructions, MCP servers |
+| `agent_server/agent.py` | Hierarchical supervisor graph: L1 router, L2 domain supervisors, Genie leaf tools (direct SDK, OBO-bound) |
+| `agent_server/prompts.py` | L1 router + L2 domain system prompts |
+| `agent_server/utils.py` | `get_user_workspace_client()` (OBO with `OBO_FALLBACK_TO_DEFAULT` escape hatch), stream helpers |
 | `agent_server/start_server.py` | FastAPI server + MLflow setup |
-| `agent_server/evaluate_agent.py` | Agent evaluation with MLflow scorers |
-| `databricks.yml` | Bundle config & resource permissions |
-| `.github/workflows/deploy.yml` | GitHub Actions workflow to deploy this app (synced from `.scripts/source/.github/workflows/`) |
-| `scripts/quickstart.py` | One-command setup script |
-| `scripts/discover_tools.py` | Discovers available workspace resources |
+| `agent_server/evaluate_agent.py` | MLflow eval scaffolding — finance/sales/OBO-denial cases |
+| `databricks.yml` | DAB definition: app name, env, `user_api_scopes`, Genie + experiment + serving-endpoint resources |
+| `manifest.yaml` | Standalone app manifest (mirrors `databricks.yml` resources) |
+| `tests/test_agent_wiring.py` | Smoke tests for DOMAINS shape, prompt guardrails, OBO contract, L1 tool wiring |
+| `.github/workflows/ci.yml` | PR/push CI: ruff + pytest |
+| `.github/workflows/deploy.yml` | Manual deploy via OIDC federation |
+| `scripts/quickstart.py` | One-command setup script (vendored from upstream template) |
+| `scripts/discover_tools.py` | Discovers available workspace resources (vendored) |
 
 ---
 

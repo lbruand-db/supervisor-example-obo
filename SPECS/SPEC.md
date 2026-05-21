@@ -90,20 +90,26 @@ returns the child's final answer (string + structured artifacts).
 
 ### 4.2 Genie tool (leaf)
 
-The Genie tool wraps the Databricks **MCP Genie server**:
+The Genie leaf calls the **direct Genie REST API** via the SDK, with the
+client bound to the end-user's identity:
 
 ```python
-DatabricksMCPServer(
-    name=f"genie-{space_name}",
-    url=f"{host}/api/2.0/mcp/genie/{space_id}",
-    workspace_client=user_ws,   # <-- OBO client, see §5
-)
+@tool(name_or_callable=f"genie_{name}")
+def _query(question: str) -> str:
+    msg = user_ws.genie.start_conversation_and_wait(space_id, question)
+    # extract text + SQL from msg.attachments, return as one string
 ```
 
-`DatabricksMultiServerMCPClient.get_tools()` returns LangChain tools the L2
-supervisor can call. Tool calls hit Genie under the user's identity, so the
-underlying SQL warehouse query is governed by Unity Catalog grants on the
-calling user.
+Each L2 supervisor gets exactly one tool, `genie_<domain>`. Because the
+`WorkspaceClient` was constructed from the forwarded user token, the Genie
+conversation runs under that user's UC grants.
+
+**Why not the MCP route** (`/api/2.0/mcp/genie/{space_id}`): we tried it
+first. The Databricks Apps `user_api_scopes` allowlist is limited
+(documented values: `sql`, `dashboards.genie`, `files.files`), and the MCP
+endpoint requires a broader scope (`all-apis`, which the bundle validator
+refuses). So the forwarded user token always 403'd against MCP. The direct
+Genie API works fine with just `dashboards.genie`. See §12.
 
 ### 4.3 Request lifecycle
 
@@ -136,8 +142,11 @@ Rules:
 - Local dev — when running outside Apps, `x-forwarded-access-token` is absent;
   fall back to the developer's CLI profile (`WorkspaceClient()`), guarded by
   an env flag (`OBO_FALLBACK_TO_DEFAULT=1`) so prod can't silently degrade.
-- `manifest.yaml` must declare `user_api_scopes` so the app is allowed to
-  request a downscoped user token (see §6).
+- `databricks.yml` must declare `user_api_scopes` at the app resource
+  level so the app is allowed to request a downscoped user token (see §6).
+  `manifest.yaml`'s `user_api_scopes` block is not enough on its own —
+  DABs reads from `databricks.yml` and what gets to the deployed app's
+  `effective_user_api_scopes` comes from there.
 
 ## 6. Databricks resources
 
@@ -173,6 +182,10 @@ user_api_scopes:
   - "dashboards.genie"   # required for Genie OBO calls
   - "sql"                # Genie issues SQL warehouse queries under the hood
 ```
+
+> The `user_api_scopes` allowlist is narrower than general Databricks OAuth
+> scopes. Documented values: `sql`, `dashboards.genie`, `files.files`.
+> `all-apis` is **not** accepted here — the bundle validator rejects it.
 
 ### 6.2 `app.yaml`
 
@@ -284,63 +297,75 @@ quickstart  = "scripts.quickstart:main"
 
 ## 8. Key implementation sketches
 
-### 8.1 `agent_server/agent.py` (pseudocode)
+### 8.1 `agent_server/agent.py` (current shape)
 
 ```python
 from databricks.sdk import WorkspaceClient
-from databricks_langchain import ChatDatabricks, DatabricksMCPServer, DatabricksMultiServerMCPClient
+from databricks_langchain import ChatDatabricks
 from langchain.agents import create_agent
 from langchain_core.tools import tool
 
-from agent_server.utils import get_user_workspace_client, host_from_env
+from agent_server import prompts
+from agent_server.utils import get_user_workspace_client
 
-LLM = ChatDatabricks(endpoint=os.environ["LLM_ENDPOINT"])
+LLM_ENDPOINT = os.environ.get("LLM_ENDPOINT", "databricks-gpt-5-2")
 
-def _genie_tools(user_ws: WorkspaceClient, space_id: str, name: str):
-    client = DatabricksMultiServerMCPClient([
-        DatabricksMCPServer(
-            name=f"genie-{name}",
-            url=f"{host_from_env()}/api/2.0/mcp/genie/{space_id}",
-            workspace_client=user_ws,
-        )
-    ])
-    return await client.get_tools()
+DOMAINS = [
+    {"name": "finance", "space_id_env": "GENIE_FINANCE_SPACE_ID",
+     "system_prompt": prompts.FINANCE_L2, "tool_description": "..."},
+    {"name": "sales",   "space_id_env": "GENIE_SALES_SPACE_ID",
+     "system_prompt": prompts.SALES_L2,   "tool_description": "..."},
+]
 
-async def build_l2(user_ws, space_id, name, prompt):
-    tools = await _genie_tools(user_ws, space_id, name)
-    return create_agent(tools=tools, model=LLM, prompt=prompt)
+def _build_genie_tool(user_ws, name, space_id):
+    @tool(name_or_callable=f"genie_{name}")
+    def _query(question: str) -> str:
+        msg = user_ws.genie.start_conversation_and_wait(space_id, question)
+        # extract text/SQL from msg.attachments, return one string
+        ...
+    return _query
 
-async def build_l1(user_ws):
-    finance = await build_l2(user_ws, os.environ["GENIE_FINANCE_SPACE_ID"],
-                             "finance", prompts.FINANCE_L2)
-    sales   = await build_l2(user_ws, os.environ["GENIE_SALES_SPACE_ID"],
-                             "sales",   prompts.SALES_L2)
+def _build_l2_supervisor(user_ws, domain):
+    space_id = os.environ[domain["space_id_env"]]
+    return create_agent(
+        tools=[_build_genie_tool(user_ws, domain["name"], space_id)],
+        model=ChatDatabricks(endpoint=LLM_ENDPOINT),
+        system_prompt=domain["system_prompt"],
+    )
 
-    @tool
-    async def ask_finance(question: str) -> str:
-        """Use for finance / accounting / revenue questions."""
-        result = await finance.ainvoke({"messages": [("user", question)]})
-        return result["messages"][-1].content
+def build_l1_agent(user_ws):
+    handoff_tools = []
+    for d in DOMAINS:
+        l2 = _build_l2_supervisor(user_ws, d)
 
-    @tool
-    async def ask_sales(question: str) -> str:
-        """Use for pipeline, opportunities, and sales-ops questions."""
-        result = await sales.ainvoke({"messages": [("user", question)]})
-        return result["messages"][-1].content
+        @tool(name_or_callable=f"ask_{d['name']}", description=d["tool_description"])
+        async def _ask(question: str, _l2=l2) -> str:
+            r = await _l2.ainvoke({"messages": [("user", question)]})
+            return r["messages"][-1].content
 
-    return create_agent(tools=[ask_finance, ask_sales], model=LLM,
-                        prompt=prompts.L1_ROUTER)
+        handoff_tools.append(_ask)
+
+    return create_agent(tools=handoff_tools,
+                        model=ChatDatabricks(endpoint=LLM_ENDPOINT),
+                        system_prompt=prompts.L1_ROUTER)
 
 @stream()
 async def stream_handler(request):
     user_ws = get_user_workspace_client()
-    agent = await build_l1(user_ws)
+    agent = build_l1_agent(user_ws)          # sync; no MCP to await
     async for ev in process_agent_astream_events(
         agent.astream({"messages": to_chat_completions_input(...)},
                       stream_mode=["updates", "messages"])
     ):
         yield ev
 ```
+
+Notes:
+- `create_agent` in `langchain` 1.x takes `system_prompt=`, not `prompt=`
+  (the first deploy 500'd until we fixed this).
+- L1 / L2 builders are **sync** — no async MCP setup to await.
+- L2 supervisors get a single `genie_<domain>` tool. L1 sees one
+  `ask_<domain>` tool per domain.
 
 ### 8.2 Prompts (`agent_server/prompts.py`)
 
@@ -374,30 +399,67 @@ After deploy, requests to `https://<app>.databricksapps.com/responses` carry
 `x-forwarded-access-token` automatically when the caller authenticates via
 the Apps OAuth flow; Genie calls then run as that user.
 
+### 10.1 Reference deployment (current)
+
+- Workspace: `https://fevm-serverless-stable-po64og.cloud.databricks.com`
+- App URL: https://supervisor-example-obo-7474659269459324.aws.databricksapps.com
+- Bundle target: `dev`
+- MLflow experiment: `1456842180535736`
+- Genie spaces:
+  - finance `01f15474886a16d5aa027e0791fa855a` — `samples.tpch.{orders, lineitem, customer, nation, region}`
+  - sales   `01f15474da541750b15a234e1fcc4145` — `samples.bakehouse.sales_{transactions, customers, franchises, suppliers}`
+- SP client_id: `2a384f0d-ceaf-4a6d-878a-77d42dfbd954`
+- `effective_user_api_scopes`: `['sql', 'iam.current-user:read', 'dashboards.genie', 'iam.access-control:read']`
+
+### 10.2 Logs require OAuth
+
+`databricks apps logs <app>` only accepts an OAuth profile, not a PAT.
+Set up a secondary U2M profile (`databricks auth login -p <name> --host …`)
+to read runtime logs.
+
+### 10.3 Genie spaces were created via `/api/2.0/data-rooms`
+
+The public SDK has no `create_space`; we POSTed to `/api/2.0/data-rooms`
+with `display_name`, `warehouse_id`, and `table_identifiers`. The newer
+`/api/2.0/genie/spaces` endpoint requires a `serialized_space` proto and
+isn't usable for fresh creation. Worth noting in case the older endpoint
+gets deprecated.
+
 ## 11. Acceptance criteria
 
-- [ ] `databricks bundle validate` passes on a fresh checkout.
-- [ ] `uv run start-app` boots locally and `/responses` returns a non-empty
-      answer routed through L1 → L2 → Genie.
-- [ ] Two end-users with **different** UC grants on the same Genie space see
-      different result sets for the same question (proves OBO).
+- [x] `databricks bundle validate` passes on a fresh checkout.
+- [x] `uv run start-server` boots locally and `/responses` returns a
+      non-empty answer routed through L1 → L2 → Genie. Verified against
+      `fevm-stable-po64og`:
+      - finance: `samples.tpch.orders` total revenue =
+        **1,133,439,215,246.25**
+      - sales: `samples.bakehouse.sales_transactions` total count = **3,333**
+- [x] Adding a third domain requires only: a new Genie space resource in
+      `databricks.yml`/`manifest.yaml`, a new prompt, and one extra entry
+      in `DOMAINS` in `agent.py` — no graph rewiring.
+- [ ] Two end-users with **different** UC grants on the same Genie space
+      see different result sets for the same question (proves OBO).
+      *Not exercised yet — requires a second test user with restricted
+      grants on the bakehouse / tpch tables.*
 - [ ] MLflow traces show the three nested spans: L1 supervisor, L2
-      supervisor, Genie tool call.
-- [ ] Adding a third domain requires only: a new Genie space resource in
-      `databricks.yml`/`manifest.yaml`, a new prompt, and one extra `@tool`
-      wrapper in `agent.py` — no graph rewiring.
+      supervisor, Genie tool call. *Traces are reaching experiment
+      `1456842180535736`; visual inspection of the span hierarchy pending.*
 
 ## 12. Decisions
 
-- **Token scope** — start with `dashboards.genie` + `sql` in
-  `user_api_scopes`; the exact Genie scope name will be confirmed on first
-  deploy (`databricks bundle run -t dev` and inspect the granted scopes). If
-  the platform reports an unknown-scope error, adjust to whatever name the
-  deploy validation surfaces.
-- **MCP vs. direct Genie SDK** — implement against the Databricks MCP Genie
-  server (`/api/2.0/mcp/genie/{space_id}`). Only fall back to
-  `WorkspaceClient.genie.start_conversation` if MCP latency proves
-  unacceptable in eval; do not build both paths up front.
+- **Token scope** *(resolved)* — final `user_api_scopes` is
+  `[dashboards.genie, sql]`. The Apps allowlist is narrow (documented:
+  `sql / dashboards.genie / files.files`); `all-apis` is rejected by the
+  bundle validator. The actually-deployed user token gets a few IAM scopes
+  added on top (see §10.1).
+- **MCP vs. direct Genie SDK** *(switched mid-flight)* — original plan was
+  MCP first. Reality: the MCP route
+  (`/api/2.0/mcp/genie/{space_id}`) 403s under OBO because it needs a
+  scope outside the `user_api_scopes` allowlist. Confirmed by decoding the
+  working U2M CLI token — it carries `all-apis`, which `user_api_scopes`
+  refuses. Switched the leaf to `w.genie.start_conversation_and_wait`,
+  which works with just `dashboards.genie`. Reconsider MCP only when the
+  Apps allowlist grows.
 - **Conversation memory** — out of scope for v1. Each request rebuilds the
   graph and is stateless. If memory is later required, port the
   short-term-memory checkpointer pieces from `agent-langgraph-advanced`
