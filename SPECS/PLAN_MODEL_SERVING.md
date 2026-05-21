@@ -304,23 +304,50 @@ On-Behalf-Of-User Authorization"**.
 |---|---|
 | Default `WorkspaceClient()` inside `predict()` | Endpoint's SP only. No OBO. |
 | `request.context` / forwarded env vars | None of them carry the caller. |
-| `WorkspaceClient(credentials_strategy=ModelServingUserCredentials())` with `AuthPolicy` attached + preview disabled | Raises `ValueError` at runtime. |
-| Same, with **preview enabled** by a workspace admin | *Untested — blocked on workspace admin.* Docs claim this returns a client scoped to the caller. |
+| `WorkspaceClient(credentials_strategy=ModelServingUserCredentials())` with `AuthPolicy` attached + preview **disabled** | Raises `ValueError` at runtime. |
+| Same, with `AuthPolicy` attached + preview **enabled** (v4 of the spike, deployed *after* the workspace toggle) | ✅ **Works.** See report below. |
 
-**Status of the port**: feasible **if and only if** the OBO preview can
-be enabled on the target workspace. Without it, the serving path falls
-back to "endpoint SP only" and loses the per-caller UC enforcement that
-is the whole point of this example.
+v4 identity report (with my U2M OAuth bearer):
 
-**Next step**: ask a workspace admin (which on this workspace is me —
-account console toggle, not yet pulled) to enable the preview, then
-re-run v3 of the spike and capture the populated `workspace_client_obo`
-+ `genie_obo` fields.
+```json
+"workspace_client_default": {
+  "auth_type": "model-serving",
+  "user_name":    "981f1bd8-06f8-4d82-95b1-b23fd005b3f7",
+  "display_name": "System Service Principal"
+},
+"workspace_client_obo": {
+  "auth_type": "model_serving_user_credentials",
+  "user_name":    "lucas.bruand@databricks.com",
+  "display_name": "Lucas Bruand"
+},
+"genie_default": { "status": "error",
+                   "message": "failed to reach COMPLETED, got MessageStatus.FAILED" },
+"genie_obo":     { "status": "ok",
+                   "message_status": "MessageStatus.COMPLETED",
+                   "has_attachments": true }
+```
+
+The contrast is the proof: the **default SP-bound client fails** the
+Genie call (the SP has no Unity Catalog grants on the underlying
+tables), while the **OBO client succeeds** under my identity. Per-caller
+UC enforcement is intact end-to-end through the serving endpoint.
+
+**Important behavioural note**: the preview is checked at **deploy
+time**, not at request time. Re-querying v3 of the spike (logged *before*
+the preview was enabled) kept failing with the same error even after the
+toggle was on. v4 — exact same model code, logged *after* enabling —
+worked on the first request. So enabling the preview requires a
+redeploy to take effect.
+
+**Status of the port**: ✅ **feasible on this workspace.** The Apps build
+remains the default for production; the serving build becomes a real
+option when callers are services / agents instead of humans.
 
 **Risk for customers**: enabling the preview is a per-workspace action,
-which means a copy-paste of this example will fail on any workspace
-that hasn't done it. The Apps build (current default) has no equivalent
-prerequisite. Worth calling out in the README when this port lands.
+and it only kicks in for endpoints deployed *after* the toggle. Worth
+calling out in the README when this port lands as an explicit
+prerequisite, with a link to the Workspace Admin → Settings → Previews
+location.
 
 ## 7. Resources mapping
 
@@ -361,10 +388,11 @@ prerequisite. Worth calling out in the README when this port lands.
 ## 10. Open questions
 
 - ~~Which OBO mechanism (§6) actually works on the target workspace?~~
-  **Answered** by the spike: `ModelServingUserCredentials` is the only
-  supported path; it requires the workspace preview flag to be on.
-  Still open: get the workspace admin to flip the flag and re-run v3 of
-  the spike to verify the OBO client actually resolves to the caller.
+  **Resolved.** `ModelServingUserCredentials` + `AuthPolicy` works once
+  the workspace OBO preview is on, *and* the model is redeployed after
+  the toggle. v4 of the spike confirmed `workspace_client_obo` resolves
+  to the caller and a Genie call under it succeeds while the SP path
+  fails on the same call.
 - Where does the agent run when the endpoint scales to zero — cold start
   cost relative to the warmed Apps process. Measure before promising a
   customer "this is faster."
