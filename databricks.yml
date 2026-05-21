@@ -1,6 +1,23 @@
 bundle:
   name: supervisor_example_obo
 
+# Workspace-specific values come from DAB variables so a fresh clone doesn't
+# silently target someone else's workspace. Fill them via either:
+#   • `uv run setup-demo --profile <p>` (creates the Genie spaces + MLflow
+#     experiment and writes BUNDLE_VAR_* lines into .env), then
+#     `uv run deploy --profile <p>` which loads .env and `bundle deploy`s.
+#   • or manually: `databricks bundle deploy --var "key=value" ...`.
+variables:
+  genie_finance_space_id:
+    description: "UUID of the finance Genie space (samples.tpch.* in the demo)."
+  genie_sales_space_id:
+    description: "UUID of the sales Genie space (samples.bakehouse.* in the demo)."
+  mlflow_experiment_id:
+    description: "MLflow experiment ID for agent traces."
+  llm_endpoint_name:
+    description: "Chat model serving endpoint used by all supervisors."
+    default: "databricks-gpt-5-2"
+
 resources:
   apps:
     supervisor_example_obo:
@@ -44,25 +61,24 @@ resources:
       resources:
         - name: 'experiment'
           experiment:
-            experiment_id: '1456842180535736'
+            experiment_id: ${var.mlflow_experiment_id}
             permission: 'CAN_MANAGE'
 
         - name: 'genie_finance'
           genie_space:
             name: 'Supervisor OBO - Finance'
-            space_id: '01f15474886a16d5aa027e0791fa855a'
+            space_id: ${var.genie_finance_space_id}
             permission: 'CAN_RUN'
 
         - name: 'genie_sales'
           genie_space:
             name: 'Supervisor OBO - Sales'
-            space_id: '01f15474da541750b15a234e1fcc4145'
+            space_id: ${var.genie_sales_space_id}
             permission: 'CAN_RUN'
 
-        # TODO: change to whichever chat model serving endpoint you want to use.
         - name: 'llm_endpoint'
           serving_endpoint:
-            name: 'databricks-gpt-5-2'
+            name: ${var.llm_endpoint_name}
             permission: 'CAN_QUERY'
 
 targets:
