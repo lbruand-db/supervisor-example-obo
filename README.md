@@ -6,29 +6,52 @@ agent and queries Genie spaces **on behalf of the calling user** (OBO).
 ```mermaid
 flowchart TD
     user([End user])
-    L1["L1 router supervisor"]
-    L2F["L2 supervisor – Finance"]
-    L2S["L2 supervisor – Sales"]
-    GF[("Genie space – Finance")]
-    GS[("Genie space – Sales")]
 
-    user -- "POST /responses<br/>x-forwarded-access-token" --> L1
-    L1 -- "ask_finance(question)" --> L2F
-    L1 -- "ask_sales(question)" --> L2S
-    L2F -- "genie_finance (OBO)" --> GF
-    L2S -- "genie_sales (OBO)" --> GS
+    subgraph SP_BOX["Service-principal context — runs as the app SP"]
+        L1["L1 router supervisor<br/>(LangGraph create_agent)"]
+        L2F["L2 supervisor – Finance<br/>(LangGraph create_agent)"]
+        L2S["L2 supervisor – Sales<br/>(LangGraph create_agent)"]
+        LLM[/"Chat LLM endpoint<br/>databricks-gpt-5-2"/]
+    end
+
+    subgraph OBO_BOX["OBO context — runs as the calling end-user"]
+        GF[("Genie space – Finance<br/>samples.tpch.*")]
+        GS[("Genie space – Sales<br/>samples.bakehouse.*")]
+    end
+
+    user -- "POST /responses<br/>Authorization: Bearer (user OAuth)" --> L1
+    L1 -- "tool: ask_finance(question)" --> L2F
+    L1 -- "tool: ask_sales(question)" --> L2S
+    L1 -. "system prompt +<br/>tool choice" .-> LLM
+    L2F -. "answer synthesis" .-> LLM
+    L2S -. "answer synthesis" .-> LLM
+    L2F == "tool: genie_finance<br/>(w.genie.start_conversation_and_wait,<br/>user_ws bound to x-forwarded-access-token)" ==> GF
+    L2S == "tool: genie_sales<br/>(w.genie.start_conversation_and_wait,<br/>user_ws bound to x-forwarded-access-token)" ==> GS
 
     classDef sp fill:#e8f1ff,stroke:#3b82f6,color:#1e3a8a;
     classDef obo fill:#fff7ed,stroke:#f97316,color:#7c2d12;
-    class L1,L2F,L2S sp;
+    class L1,L2F,L2S,LLM sp;
     class GF,GS obo;
+    style SP_BOX fill:#f5faff,stroke:#3b82f6,color:#1e3a8a;
+    style OBO_BOX fill:#fff8f0,stroke:#f97316,color:#7c2d12;
 ```
 
-- Blue nodes (L1 / L2 supervisors and the chat LLM) run under the **app
-  service-principal**.
-- Orange nodes (Genie tool calls) run under the **end-user's identity** via
-  `x-forwarded-access-token`, so Unity Catalog grants on the underlying
-  tables are enforced per caller.
+**How to read the diagram**
+
+| Element | Identity | Auth mechanism | Notes |
+|---|---|---|---|
+| Inbound `POST /responses` | End user | OAuth user token in `Authorization` header | Databricks Apps proxy mints the user token and re-forwards it as `x-forwarded-access-token`. |
+| L1 / L2 supervisors (blue box) | App service-principal | SP M2M (auto-injected by the platform) | The LangGraph runtime, tool-routing logic, and chat-LLM calls all happen here. Nothing in this box touches user data directly. |
+| LLM endpoint calls (dotted edges) | App service-principal | SP M2M | The `databricks-gpt-5-2` serving endpoint is granted `CAN_QUERY` to the app's SP in `databricks.yml`. |
+| Solid edges between supervisors | App service-principal | In-process tool call | `ask_finance` / `ask_sales` are plain LangChain tools that invoke a child agent — no network hop, no identity change. |
+| Thick edges to Genie spaces | **End user (OBO)** | User OAuth token forwarded via `x-forwarded-access-token` | `agent_server/utils.py:get_user_workspace_client()` builds a `WorkspaceClient(token=fwd_token, auth_type="pat")` per request. The Genie call runs under that identity, so Unity Catalog grants on the underlying tables are enforced per caller. |
+| Genie spaces (orange box) | **End user (OBO)** | Same forwarded token | The space itself is declared as an app resource with `CAN_RUN` for the SP, but the *query* against it is run by the user, not the SP. |
+
+> Why the Genie leaf uses `start_conversation_and_wait` instead of the MCP
+> route: the Databricks Apps `user_api_scopes` allowlist (`sql`,
+> `dashboards.genie`, `files.files`) doesn't include the scope the MCP
+> endpoint (`/api/2.0/mcp/genie/{space_id}`) demands, so MCP 403s under
+> OBO. See [`SPECS/SPEC.md`](SPECS/SPEC.md) §12 for the full trace.
 
 ## Live deployment
 
