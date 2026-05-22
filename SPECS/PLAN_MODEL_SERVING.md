@@ -430,12 +430,17 @@ plumbing path), and only the endpoint shape lives in `databricks.yml`.
       verbatim inside `ResponsesAgent.predict()` and returns the correct
       L1→L2→Genie answer under OBO (`$1,133,439,215,246.25` for the
       `samples.tpch.orders` total, identical to the Apps build).
-- [ ] `uv run deploy-serving --profile mine` creates / updates the
-      endpoint end-to-end on a clean checkout (idempotent). *The spike
-      used a one-off Python driver; the bundle wrapper still needs
-      writing.*
-- [ ] One endpoint query covers a finance prompt **and** a sales prompt.
-      *Spike only verified finance.*
+- [x] `uv run deploy-serving --profile mine` creates / updates the
+      endpoint end-to-end. Verified on the workspace: deploys
+      `serverless_stable_po64og_catalog.supervisor_example_obo.supervisor`
+      to endpoint `supervisor-example-obo-serving` in ~10 min on first
+      run.
+- [x] One endpoint query covers a finance prompt **and** a sales prompt:
+      finance → `ask_finance` → `samples.tpch.orders` → `$1,133,439,215,246.25`;
+      sales → `ask_sales` → `samples.bakehouse.sales_transactions` →
+      3,333 total, top 3 franchises Sweet Temptations / Sugar Rush /
+      Chiba Chews. Both responses include the `function_call` +
+      `function_call_output` items so routing is visible.
 - [ ] Two end-users with different UC grants on the same Genie space see
       different result sets via the endpoint (proves OBO is truly
       per-caller, not just spoofed). *Untested.*
