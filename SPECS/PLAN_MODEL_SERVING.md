@@ -97,7 +97,7 @@ flowchart TD
 
 ## 4. What changes vs the Apps build
 
-### 4.1 Reused as-is
+### 4.1 Reused as-is *(confirmed by second spike — `spikes/serving-obo-realagent/`)*
 
 - `agent_server/prompts.py` — system prompts.
 - `agent_server/agent.py` — the `DOMAINS` list, `_build_genie_tool`,
@@ -105,6 +105,14 @@ flowchart TD
   stays. **Only the identity binding changes (see §6).**
 - `tests/test_agent_wiring.py` — still validates the graph; expect to add
   one test for the serving-side identity helper.
+
+The second spike logged the production `build_l1_agent` (LangChain
+`create_agent` + async `agent.ainvoke`) verbatim, wrapped only by a
+`SupervisorAgent(ResponsesAgent)` shell whose `predict()` builds the
+user-bound client and runs `asyncio.run(agent.ainvoke(...))`. The
+deployed endpoint answered `"sum of o_totalprice in samples.tpch.orders?"`
+with the same `$1,133,439,215,246.25` figure the Apps build returns —
+under the caller's identity, routed through the same L1→L2→Genie graph.
 
 ### 4.2 Replaced
 
@@ -121,61 +129,81 @@ flowchart TD
   (§6) — keep the same function name so the rest of `agent.py` doesn't
   change.
 
-### 4.3 Added
+### 4.3 Added *(shape confirmed by `spikes/serving-obo-realagent/`)*
 
-- `agent_server/responses_agent.py` — `ResponsesAgent` subclass. Roughly:
+- `agent_server/responses_agent.py` — `ResponsesAgent` subclass.
+  Concrete shape (lifted from the spike):
 
   ```python
+  import asyncio
+  from databricks.sdk import WorkspaceClient
+  from databricks_ai_bridge import ModelServingUserCredentials
   from mlflow.pyfunc import ResponsesAgent
   from mlflow.types.responses import ResponsesAgentRequest, ResponsesAgentResponse
 
-  class SupervisorResponsesAgent(ResponsesAgent):
-      def predict(self, request: ResponsesAgentRequest) -> ResponsesAgentResponse:
-          user_ws = get_user_workspace_client(request)  # §6
-          agent = build_l1_agent(user_ws)
-          # invoke + collect outputs (sync wrapper around the existing
-          # `.ainvoke()` graph)
+  from agent_server.agent import build_l1_agent
 
-      def predict_stream(self, request):
-          ...
+  class SupervisorAgent(ResponsesAgent):
+      def predict(self, request: ResponsesAgentRequest) -> ResponsesAgentResponse:
+          # MUST be inside predict(); ModelServingUserCredentials only
+          # resolves with a live caller context.
+          user_ws = WorkspaceClient(credentials_strategy=ModelServingUserCredentials())
+          agent = build_l1_agent(user_ws)
+          lc_messages = _to_langchain_messages(request.input)
+          result = asyncio.run(agent.ainvoke({"messages": lc_messages}))
+          text = result["messages"][-1].content
+          return ResponsesAgentResponse(
+              output=[self.create_text_output_item(text=text, id="msg-final")]
+          )
+
+      # predict_stream(): mirror the above but use agent.astream() and
+      # yield ResponsesAgentStreamEvent objects. Not yet implemented in
+      # the spike — port `agent_server/utils.py:process_agent_astream_events`
+      # to do the same conversion.
   ```
 
-- `scripts/log_model.py` — logs the model with MLflow, registers it to UC,
-  and declares the Databricks resources it needs:
+- `scripts/log_model.py` — logs and registers the model. The spike
+  confirmed **`mlflow.pyfunc.log_model(python_model=<path>, code_paths=...)`**
+  is the right call (not `mlflow.langchain.log_model(lc_model=...)`, which
+  was a guess in v1 of this plan). The `code_paths=[…/agent_server]` arg
+  is required so the production agent module is packaged into the model
+  artifact:
 
   ```python
-  import mlflow
-  from mlflow.models.resources import (
-      DatabricksGenieSpace, DatabricksServingEndpoint,
-  )
-  from agent_server.responses_agent import SupervisorResponsesAgent
-
-  with mlflow.start_run():
-      mlflow.langchain.log_model(
-          lc_model="agent_server.agent",   # or python_model=SupervisorResponsesAgent()
-          name="supervisor_example_obo",
-          resources=[
+  mlflow.pyfunc.log_model(
+      name="supervisor",
+      python_model="agent_server/responses_agent.py",
+      code_paths=["agent_server"],
+      pip_requirements=[
+          "mlflow>=3.10.0",
+          "databricks-agents>=1.9.3",
+          "databricks-ai-bridge>=0.18.0",
+          "databricks-langchain>=0.17.0",
+          "langchain>=1.0.0",
+          "langgraph>=1.1.0",
+      ],
+      registered_model_name=f"{CATALOG}.{SCHEMA}.supervisor_example_obo",
+      auth_policy=AuthPolicy(
+          user_auth_policy=UserAuthPolicy(api_scopes=["dashboards.genie", "sql"]),
+          system_auth_policy=SystemAuthPolicy(resources=[
               DatabricksGenieSpace(genie_space_id=GENIE_FINANCE_ID),
               DatabricksGenieSpace(genie_space_id=GENIE_SALES_ID),
               DatabricksServingEndpoint(endpoint_name=LLM_ENDPOINT),
-          ],
-          registered_model_name=f"{CATALOG}.{SCHEMA}.supervisor_example_obo",
-      )
+          ]),
+      ),
+  )
   ```
 
-  Resource declarations matter: Mosaic AI uses them to provision the
-  endpoint's SP with `CAN_RUN` on the Genie spaces and `CAN_QUERY` on the
-  LLM endpoint without requiring a human to grant them after deploy.
+- `scripts/deploy_serving.py` — loads `.env`, calls `log_model.py`, then
+  `databricks.agents.deploy(model_name, model_version, endpoint_name=...,
+  environment_vars={GENIE_FINANCE_SPACE_ID, GENIE_SALES_SPACE_ID,
+  LLM_ENDPOINT})`. Passing the IDs through `environment_vars=` is
+  necessary because `_build_l2_supervisor` reads them from `os.environ`.
 
-- `databricks.yml` (new bundle target): declares `registered_models` (UC),
-  the bundle variable for `catalog.schema.model_name`, and a
-  `serving_endpoints` resource bound to the latest model version with
-  `workload_size: Small`, `scale_to_zero_enabled: true`.
-
-- `scripts/deploy_serving.py` — sister to `scripts/deploy.py`. Loads
-  `.env`, runs `uv run python -m scripts.log_model` to log and register
-  the model, then `databricks bundle deploy -t serving` to update the
-  endpoint.
+- `databricks.yml` (new bundle target): *not used by the spike.* The
+  spike deployed directly via `databricks.agents.deploy()`. Whether the
+  same can be expressed as a `serving_endpoints` DAB resource bound to
+  the latest UC model version is still **untested** — see §4.4 / §10.
 
 ### 4.4 Bundle layout sketch
 
@@ -395,20 +423,31 @@ plumbing path), and only the endpoint shape lives in `databricks.yml`.
 
 ## 9. Acceptance criteria
 
-- [ ] §6 spike: caller identity is reachable inside the served model.
-      Document which mechanism worked and link to the Databricks doc.
+- [x] §6 spike: caller identity is reachable inside the served model.
+      `ModelServingUserCredentials` + `UserAuthPolicy` works once the
+      workspace OBO preview is on. Documented in §6.
+- [x] Real-agent spike: the production `build_l1_agent` graph runs
+      verbatim inside `ResponsesAgent.predict()` and returns the correct
+      L1→L2→Genie answer under OBO (`$1,133,439,215,246.25` for the
+      `samples.tpch.orders` total, identical to the Apps build).
 - [ ] `uv run deploy-serving --profile mine` creates / updates the
-      endpoint end-to-end on a clean checkout (idempotent).
-- [ ] `databricks serving-endpoints query supervisor-example-obo …`
-      returns a routed answer for a finance prompt **and** for a sales
-      prompt.
+      endpoint end-to-end on a clean checkout (idempotent). *The spike
+      used a one-off Python driver; the bundle wrapper still needs
+      writing.*
+- [ ] One endpoint query covers a finance prompt **and** a sales prompt.
+      *Spike only verified finance.*
 - [ ] Two end-users with different UC grants on the same Genie space see
-      different result sets via the endpoint (proves OBO survived).
+      different result sets via the endpoint (proves OBO is truly
+      per-caller, not just spoofed). *Untested.*
 - [ ] Adding a third domain still only requires editing `DOMAINS` in
       `agent.py`, adding the prompt, and adding the resource to the
       `log_model` call. No graph rewiring.
 - [ ] `evaluate_agent.py` runs against the endpoint URL the same way it
       runs against `localhost:8000` today (swap `predict_fn`).
+- [ ] `predict_stream()` is implemented and returns intermediate
+      `function_call` items for routing visibility (not just the final
+      text). The spike's `predict()` only returns the last message and
+      hides the L1 / L2 tool calls.
 
 ## 10. Open questions
 
@@ -421,10 +460,10 @@ plumbing path), and only the endpoint shape lives in `databricks.yml`.
 - Where does the agent run when the endpoint scales to zero — cold start
   cost relative to the warmed Apps process. Measure before promising a
   customer "this is faster."
-- `mlflow.langchain.log_model` vs `mlflow.pyfunc.log_model` with a
-  hand-written `ResponsesAgent` subclass: the first is shorter; the
-  second is more explicit. Default to subclassing if the LangChain
-  autolog path drops trace metadata.
+- ~~`mlflow.langchain.log_model` vs `mlflow.pyfunc.log_model`~~
+  **Resolved.** `pyfunc.log_model(python_model=…, code_paths=[…])` with
+  a `ResponsesAgent` subclass works; we never tried `langchain.log_model`
+  because the spike's pattern was sufficient. Stick with `pyfunc`.
 - Are Genie spaces and the LLM endpoint the only resources the agent
   touches, or should we also declare `DatabricksTable` for the
   underlying UC tables (Mosaic AI permissions docs are inconsistent)?
