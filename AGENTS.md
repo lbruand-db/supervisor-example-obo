@@ -2,13 +2,20 @@
 
 ## This project at a glance
 
-Hierarchical supervisor agent on Databricks Apps:
+Hierarchical supervisor agent. Two deployment surfaces share the **same
+agent code** in `agent_server/`:
+
+| Surface | Entry point | OBO mechanism | When to pick |
+|---|---|---|---|
+| **Databricks Apps** (default) | `uv run deploy` → app at `…databricksapps.com` | `x-forwarded-access-token` lifted by `utils.get_user_workspace_client` | Browser users; bundled chat UI; no preview prereq. |
+| **Model Serving** | `uv run deploy-serving` → endpoint at `…/serving-endpoints/...` | `WorkspaceClient(credentials_strategy=ModelServingUserCredentials())` inside `responses_agent.py:predict()` | Service-to-service callers; UC-governed model registration; scale-to-zero. **Requires** the workspace public preview *"Agent Framework: On-Behalf-Of-User Authorization"* and a (re)deploy after enabling it. |
+
+Both surfaces:
 
 - **L1 router** picks one domain. **L2 domain supervisors** (finance, sales)
   each own one Genie space.
 - **OBO at the leaf**: L2 supervisors call Genie under the **end-user's
-  identity** via `x-forwarded-access-token`. LLM + infra calls stay on the
-  app service principal.
+  identity**. LLM + infra calls stay on the SP.
 - **Genie via the direct SDK**, not MCP. The MCP route
   (`/api/2.0/mcp/genie/{space_id}`) 403s under OBO because it requires a
   scope outside the `user_api_scopes` allowlist (`sql`, `dashboards.genie`,
@@ -173,8 +180,10 @@ After installation, the skills will be available as slash commands (e.g., `/agen
 | Setup | `uv run quickstart` |
 | Discover tools | `uv run discover-tools` |
 | Run locally | `uv run start-app` |
-| Deploy | `databricks bundle deploy && databricks bundle run supervisor_example_obo` |
-| View logs | `databricks apps logs <app-name> --follow` |
+| Deploy (Apps) | `uv run deploy --profile <p>` |
+| Deploy (Model Serving) | `uv run deploy-serving --profile <p>` |
+| View Apps logs | `databricks apps logs <app-name> --follow -p <oauth-profile>` |
+| View Serving logs | `databricks serving-endpoints logs <endpoint-name> -p <oauth-profile>` |
 
 ---
 
@@ -192,8 +201,11 @@ After installation, the skills will be available as slash commands (e.g., `/agen
 | `tests/test_agent_wiring.py` | Smoke tests for DOMAINS shape, prompt guardrails, OBO contract, L1 tool wiring |
 | `.github/workflows/ci.yml` | PR/push CI: ruff + pytest |
 | `.github/workflows/deploy.yml` | Manual deploy via OIDC federation |
+| `agent_server/responses_agent.py` | MLflow `ResponsesAgent` subclass used by the Model Serving build — same graph, identity bound via `ModelServingUserCredentials` |
 | `scripts/setup_demo.py` | `uv run setup-demo`: creates two Genie spaces + MLflow experiment + writes `.env` (idempotent) |
-| `scripts/deploy.py` | `uv run deploy`: loads `.env` so `BUNDLE_VAR_*` is set, then bundle validate + deploy + run |
+| `scripts/deploy.py` | `uv run deploy`: loads `.env` so `BUNDLE_VAR_*` is set, then bundle validate + deploy + run (**Apps build**) |
+| `scripts/log_model.py` | `uv run log-model`: logs `responses_agent.py` with `AuthPolicy(UserAuthPolicy+SystemAuthPolicy)` to MLflow + UC |
+| `scripts/deploy_serving.py` | `uv run deploy-serving`: calls log-model then `databricks.agents.deploy()` (**Model Serving build**) |
 | `scripts/quickstart.py` | Vendored upstream setup script (auth + experiment) — superseded for this repo by `setup-demo` / `deploy` |
 | `scripts/discover_tools.py` | Discovers available workspace resources (vendored) |
 

@@ -103,6 +103,46 @@ in `agent_server/prompts.py`, then point the bundle at your own Genie
 spaces by editing `setup_demo.py`'s `FINANCE_TABLES` / `SALES_TABLES` or
 by setting the `GENIE_*_SPACE_ID` values manually in `.env`.
 
+## Alternative: deploy as a Mosaic AI Model Serving endpoint
+
+The same supervisor graph can be served by **Model Serving** instead of
+Databricks Apps. Pick this when callers are services / other agents and
+you want UC-governed model registration + auto-scale to zero. See
+[`SPECS/PLAN_MODEL_SERVING.md`](SPECS/PLAN_MODEL_SERVING.md) for the
+full design rationale.
+
+**Prerequisite** (one-time, workspace admin): enable the public preview
+**"Agent Framework: On-Behalf-Of-User Authorization"** at
+*Workspace Admin → Settings → Previews*. Without it, the per-caller
+identity propagation fails at runtime with a clear `ValueError`. The
+endpoint must be (re)deployed *after* the toggle for it to take effect.
+
+```bash
+# Same setup as the Apps build — populates GENIE_*_SPACE_ID in .env.
+uv run setup-demo --profile mine
+
+# Log the model to UC + create/update the serving endpoint.
+uv run deploy-serving --profile mine
+# Expects SERVING_UC_CATALOG / SERVING_UC_SCHEMA / SERVING_UC_MODEL_NAME /
+# SERVING_ENDPOINT_NAME in .env (defaults in .env.example).
+```
+
+When the endpoint reaches `READY` (~5–15 min on first deploy), query it
+as a user with an OAuth token (PATs don't carry through the serving
+proxy):
+
+```bash
+HOST=https://<your-workspace>.cloud.databricks.com
+TOKEN=$(databricks auth token --host $HOST -p mine | jq -r .access_token)
+curl -s -X POST "$HOST/serving-endpoints/supervisor-example-obo-serving/invocations" \
+  -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+  -d '{"input":[{"role":"user","content":"Total order revenue in samples.tpch.orders?"}]}'
+```
+
+The Apps build (`uv run deploy`) and the Serving build (`uv run
+deploy-serving`) are independent — you can have both running on the same
+workspace and they share the same agent code in `agent_server/`.
+
 ## Live deployment
 
 L1 routes a finance question to `ask_finance`, the L2 supervisor calls the
