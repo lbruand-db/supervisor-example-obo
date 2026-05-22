@@ -1,5 +1,14 @@
 # Hierarchical Supervisor Agent (with Genie OBO)
 
+[![CI](https://github.com/lbruand-db/supervisor-example-obo/actions/workflows/ci.yml/badge.svg)](https://github.com/lbruand-db/supervisor-example-obo/actions/workflows/ci.yml)
+[![Python 3.11+](https://img.shields.io/badge/python-3.11+-3776AB?logo=python&logoColor=white)](https://www.python.org/)
+[![uv](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/astral-sh/uv/main/assets/badge/v0.json)](https://github.com/astral-sh/uv)
+[![Ruff](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/astral-sh/ruff/main/assets/badge/v2.json)](https://github.com/astral-sh/ruff)
+[![pytest](https://img.shields.io/badge/tested%20with-pytest-0A9EDC?logo=pytest&logoColor=white)](https://docs.pytest.org/)
+[![Databricks](https://img.shields.io/badge/Databricks-Apps%20%2B%20Model%20Serving-FF3621?logo=databricks&logoColor=white)](https://docs.databricks.com/aws/en/dev-tools/databricks-apps/)
+[![MLflow](https://img.shields.io/badge/MLflow-ResponsesAgent-0194E2?logo=mlflow&logoColor=white)](https://mlflow.org/docs/latest/genai/flavors/responses-agent-intro/)
+[![LangChain](https://img.shields.io/badge/LangChain-LangGraph-1C3C3C?logo=langchain&logoColor=white)](https://www.langchain.com/langgraph)
+
 A Databricks App that hosts a LangChain/LangGraph **hierarchical supervisor**
 agent and queries Genie spaces **on behalf of the calling user** (OBO).
 
