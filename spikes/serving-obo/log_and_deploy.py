@@ -66,9 +66,7 @@ def main() -> int:
     from identity_echo import IdentityEchoAgent  # noqa: E402
 
     local = IdentityEchoAgent()
-    smoke = local.predict(
-        ResponsesAgentRequest(input=[{"role": "user", "content": "ping"}])
-    )
+    smoke = local.predict(ResponsesAgentRequest(input=[{"role": "user", "content": "ping"}]))
     print("==> Local smoke output type:", type(smoke).__name__)
 
     # OBO needs an AuthPolicy at log time:
@@ -105,17 +103,13 @@ def main() -> int:
         return 0
 
     # Resolve version that was just registered.
-    versions = w.registered_models.get(
-        full_name=f"{UC_CATALOG}.{UC_SCHEMA}.{UC_MODEL_NAME}"
-    )
+    versions = w.registered_models.get(full_name=f"{UC_CATALOG}.{UC_SCHEMA}.{UC_MODEL_NAME}")
     latest_version = max(int(a.version) for a in versions.aliases or []) if False else None
     if latest_version is None:
         # Fall back to listing model versions.
         from databricks.sdk.service.catalog import ModelVersionInfo  # noqa: F401
 
-        mvs = w.model_versions.list(
-            full_name=f"{UC_CATALOG}.{UC_SCHEMA}.{UC_MODEL_NAME}"
-        )
+        mvs = w.model_versions.list(full_name=f"{UC_CATALOG}.{UC_SCHEMA}.{UC_MODEL_NAME}")
         latest_version = max(int(mv.version) for mv in mvs)
     print(f"==> Latest UC model version: {latest_version}")
 

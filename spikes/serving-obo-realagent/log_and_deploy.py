@@ -19,7 +19,6 @@ from databricks.sdk import WorkspaceClient
 from dotenv import load_dotenv
 from mlflow.models.auth_policy import AuthPolicy, SystemAuthPolicy, UserAuthPolicy
 from mlflow.models.resources import DatabricksGenieSpace, DatabricksServingEndpoint
-from mlflow.types.responses import ResponsesAgentRequest
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 MODEL_FILE = Path(__file__).with_name("supervisor_responses_agent.py")
